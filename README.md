@@ -38,46 +38,28 @@ Learning goal: understand Behaviour ↔ Handler lifecycle, substream framing, an
 
 ### Big picture
 
-```text
-┌──────────────────────────────────────────────────────────────┐
-│ App / examples/three_node.rs                                 │
-│  SwarmBuilder (TCP+Noise+Yamux) · listen · dial · event loop │
-│  propose() / consume Event                                   │
-└────────────────────────────┬─────────────────────────────────┘
-                             │ plugs Behaviour into
-                             ▼
-┌──────────────────────────────────────────────────────────────┐
-│ Swarm                          ★ PROVIDED BY libp2p          │
-│  polls Behaviour · performs Dial · manages connections       │
-└────────────────────────────┬─────────────────────────────────┘
-                             │ poll / ToSwarm / handler events
-                             ▼
-┌──────────────────────────────────────────────────────────────┐
-│ RaftBehaviour                  ★ WE WRITE (behaviour.rs)     │
-│  owns: RaftEngine, MemoryStorage, PeerMap,                   │
-│        PendingRequests, poll-driven deadline timer state     │
-│  maps: Action::Send → (ToSwarm::Dial if needed)              │
-│                     → NotifyHandler(SendRequest)             │
-│  matches responses by correlation_id                         │
-└──────────────┬───────────────────────────────┬───────────────┘
-               │ sync calls                    │ per connection
-               ▼                               ▼
-┌──────────────────────────┐    ┌──────────────────────────────┐
-│ RaftEngine ★ WE WRITE    │    │ ConnectionHandler ★ WE WRITE │
-│ (raft/engine.rs)         │    │ (handler.rs)                 │
-│ pure sync SM             │    │ /libp2p-raft/1.0.0           │
-│ NO PeerId / Dial / stream│    │ unary framed substreams      │
-│ tick / handle_rpc        │    │ length + bincode             │
-│ → Vec<Action>            │    └──────────────────────────────┘
-└────────────┬─────────────┘
-             │ persist()
-             ▼
-┌──────────────────────────┐
-│ Storage ★ WE WRITE       │
-│ MemoryStorage            │
-│ persist() atomic *in     │
-│ process* (not on disk)   │
-└──────────────────────────┘
+```mermaid
+flowchart TB
+  subgraph App["App / examples/three_node.rs"]
+    APP["SwarmBuilder TCP+Noise+Yamux<br/>listen · dial · event loop<br/>propose / consume Event"]
+  end
+
+  subgraph Libp2p["★ PROVIDED BY libp2p"]
+    SW["Swarm<br/>polls Behaviour · Dial · connections"]
+  end
+
+  subgraph WeWrite["★ WE WRITE"]
+    BH["RaftBehaviour — behaviour.rs<br/>owns Engine, Storage, PeerMap,<br/>PendingRequests, deadline timer<br/>Action::Send → Dial if needed → NotifyHandler<br/>match responses by correlation_id"]
+    ENG["RaftEngine — raft/engine.rs<br/>pure sync SM · no PeerId/Dial/stream<br/>tick / handle_rpc → Actions"]
+    HND["ConnectionHandler — handler.rs<br/>/libp2p-raft/1.0.0<br/>unary framed substreams<br/>length + bincode"]
+    ST["Storage / MemoryStorage<br/>persist atomic in-process<br/>not on disk"]
+  end
+
+  APP -->|"plugs Behaviour into"| SW
+  SW -->|"poll / ToSwarm / handler events"| BH
+  BH -->|"sync calls"| ENG
+  BH -->|"per connection"| HND
+  ENG -->|"persist()"| ST
 ```
 
 **Threading model:** single Swarm event loop. `RaftEngine` is called synchronously from `NetworkBehaviour::poll` — no background consensus thread. Engine is `Send`-friendly state, but not driven on its own task.
@@ -107,22 +89,27 @@ Learning goal: understand Behaviour ↔ Handler lifecycle, substream framing, an
 
 ### Sequence (propose → commit)
 
-```text
-App              Swarm         Behaviour         Engine          Handler         Peer
- │                │               │                │               │              │
- │ propose(data)  │               │                │               │              │
- │───────────────►│──────────────►│ handle propose │               │              │
- │                │               │───────────────►│               │              │
- │                │               │◄── Action::Send│               │              │
- │                │◄─ ToSwarm::Dial (if no conn) ─│               │              │
- │                │── connection ─►│               │               │              │
- │                │               │ NotifyHandler ─► open substream │              │
- │                │               │                │               │── WireEnv ──►│
- │                │               │                │               │◄─ response ──│
- │                │               │◄ correlation_id│               │              │
- │                │               │───────────────►│ handle_rpc    │              │
- │                │               │◄── Apply/…     │               │              │
- │◄── Event::Committed ───────────│                │               │              │
+```mermaid
+sequenceDiagram
+  participant App
+  participant Swarm
+  participant Behaviour
+  participant Engine
+  participant Handler
+  participant Peer
+
+  App->>Behaviour: propose(data)
+  Behaviour->>Engine: propose / persist append
+  Engine-->>Behaviour: Action::Send AppendEntries
+  Behaviour->>Swarm: ToSwarm::Dial if no connection
+  Swarm-->>Behaviour: connection established
+  Behaviour->>Handler: NotifyHandler SendRequest
+  Handler->>Peer: WireEnvelope on /libp2p-raft/1.0.0
+  Peer-->>Handler: response
+  Handler-->>Behaviour: Response correlation_id
+  Behaviour->>Engine: handle_rpc
+  Engine-->>Behaviour: Apply / commit actions
+  Behaviour-->>App: Event::Committed
 ```
 
 Same pattern for **election**: Sleep deadline → `engine.tick` → `Broadcast`/`Send` **RequestVote** → responses → majority → `BecomeLeader` → `Event::RoleChanged`. On leader failure, followers' election timeouts fire and a new election runs (standard Raft); connection loss alone does **not** remove a node from membership.
