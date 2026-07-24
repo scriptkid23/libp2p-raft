@@ -1,0 +1,23 @@
+# Rust build
+/target/
+
+# Cargo lock — library crate; apps that depend on us resolve their own lockfile
+# Uncomment the next line if you prefer to track an exact lock for examples/CI:
+# Cargo.lock
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Env / secrets
+.env
+.env.*
+
+# Coverage / misc
+*.profraw
+*.profdata
+/coverage/
