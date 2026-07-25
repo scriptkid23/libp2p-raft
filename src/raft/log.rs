@@ -1,8 +1,13 @@
-//! Log helpers used by RaftEngine (conflict checks, slice for AppendEntries).
-//!
-//! Plan: Task 3 (minimal last_index_term) / Task 6 (full replication helpers).
+use crate::raft::types::{Index, Term};
+use crate::storage::Storage;
 
-// TODO(Task 3): helpers around Storage::last_index_term for RequestVote log check
-// TODO(Task 6): prev_log_index / prev_log_term mismatch detection
-// TODO(Task 6): entries slice for follower starting at next_index
-// TODO(Task 6): commit rule helper — majority match_index + term == current_term
+/// Returns true if the candidate's log is at least as up-to-date as the local log.
+pub fn log_is_up_to_date(
+    storage: &impl Storage,
+    candidate_last_index: Index,
+    candidate_last_term: Term,
+) -> bool {
+    let (last_index, last_term) = storage.last_index_term();
+    candidate_last_term > last_term
+        || (candidate_last_term == last_term && candidate_last_index >= last_index)
+}

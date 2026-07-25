@@ -1,13 +1,47 @@
-//! Core Raft type aliases and durable structures.
-//!
-//! Plan: Task 1 — shared by storage, engine, protocol.
+use serde::{Deserialize, Serialize};
 
-// TODO(Task 1): pub type NodeId = u64;
-// TODO(Task 1): pub type Term = u64;
-// TODO(Task 1): pub type Index = u64;
-//
-// TODO(Task 1): pub enum Role { Follower, Candidate, Leader }
-// TODO(Task 1): pub struct HardState { current_term, voted_for: Option<NodeId> }
-// TODO(Task 1): pub enum EntryType { Command(Vec<u8>), Config(MembershipChange) } // Config in Task 8
-// TODO(Task 1): pub struct LogEntry { index, term, entry_type }
-// TODO(Task 1): pub struct Snapshot { last_included_index, last_included_term, conf, state_blob }
+pub type NodeId = u64;
+pub type Term = u64;
+pub type Index = u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    Follower,
+    Candidate,
+    Leader,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HardState {
+    pub current_term: Term,
+    pub voted_for: Option<NodeId>,
+}
+
+impl Default for HardState {
+    fn default() -> Self {
+        Self {
+            current_term: 0,
+            voted_for: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EntryType {
+    Command(Vec<u8>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub index: Index,
+    pub term: Term,
+    pub entry_type: EntryType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub last_included_index: Index,
+    pub last_included_term: Term,
+    pub conf: Vec<NodeId>,
+    pub state_blob: Vec<u8>,
+}

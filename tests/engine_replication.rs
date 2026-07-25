@@ -3,17 +3,14 @@
 //! Plan: Task 6 (replication) / Task 7 (optional snapshot cases here or engine_snapshot.rs).
 
 #[test]
+#[ignore = "Task 6: log replication not implemented yet"]
 fn leader_appends_and_commits_after_majority_match() {
-    // TODO(Task 6): elect leader; propose; feed AppendEntriesResp success from majority
-    // TODO(Task 6): assert commit advances + Apply / apply_ready entries
     unimplemented!("Task 6: leader_appends_and_commits_after_majority_match")
 }
 
 #[test]
+#[ignore = "Task 6: log replication not implemented yet"]
 fn follower_rejects_mismatch_leader_decrements_next_index() {
-    // TODO(Task 6): leader next_index starts high; follower returns success=false
-    // TODO(Task 6): assert next_index decreased by 1 (floored by match_index+1 / 1)
-    // Constraint: simple decrement — no conflict-index hints
     unimplemented!("Task 6: follower_rejects_mismatch_leader_decrements_next_index")
 }
 

@@ -198,11 +198,11 @@ Run: `cargo test --test engine_election`
 
 ## Phase 1 success checklist
 
-- [ ] `cargo test --test codec_roundtrip` — PASS
-- [ ] `cargo test --test storage_memory` — PASS
-- [ ] `cargo test --test engine_election` — PASS
-- [ ] `RaftEngine` has **zero** libp2p imports
-- [ ] No Handler / Behaviour / Swarm code required yet
+- [x] `cargo test --test codec_roundtrip` — PASS
+- [x] `cargo test --test storage_memory` — PASS
+- [x] `cargo test --test engine_election` — PASS
+- [x] `RaftEngine` has **zero** libp2p imports
+- [x] No Handler / Behaviour / Swarm code required yet
 
 ---
 

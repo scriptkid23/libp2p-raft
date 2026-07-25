@@ -1,7 +1,31 @@
-//! Crate-level and domain errors.
-//!
-//! Plan: Task 1 — `Error`, `RaftError`, `StorageError` via `thiserror`.
+use thiserror::Error;
 
-// TODO(Task 1): pub enum Error { Raft, Storage, Codec(String), UnknownNode(u64), Rpc(String) }
-// TODO(Task 1): pub enum RaftError { NotLeader, MembershipPending, InvalidMembership }
-// TODO(Task 1): pub enum StorageError { Msg(String) }
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error(transparent)]
+    Raft(#[from] RaftError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+    #[error("codec: {0}")]
+    Codec(String),
+    #[error("unknown node {0}")]
+    UnknownNode(u64),
+    #[error("rpc failed: {0}")]
+    Rpc(String),
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum RaftError {
+    #[error("not leader")]
+    NotLeader,
+    #[error("membership change pending")]
+    MembershipPending,
+    #[error("invalid membership change")]
+    InvalidMembership,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum StorageError {
+    #[error("storage: {0}")]
+    Msg(String),
+}

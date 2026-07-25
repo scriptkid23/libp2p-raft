@@ -1,16 +1,48 @@
-//! Raft RPC wire messages + envelope with correlation_id.
-//!
-//! Plan: Task 1 — serde Serialize/Deserialize for bincode.
+use serde::{Deserialize, Serialize};
 
-// TODO(Task 1): pub struct WireEnvelope { correlation_id: u64, msg: RaftMessage }
-//
-// TODO(Task 1): pub enum RaftMessage {
-//     RequestVote { term, candidate_id, last_log_index, last_log_term },
-//     RequestVoteResp { term, vote_granted },
-//     AppendEntries { term, leader_id, prev_log_index, prev_log_term, entries, leader_commit },
-//     AppendEntriesResp { term, success, match_index },
-//     InstallSnapshot { term, leader_id, last_included_index, last_included_term, offset, data, done },
-//     InstallSnapshotResp { term },
-// }
-// Note: Heartbeat = AppendEntries with entries = []
-// Membership changes travel as EntryType::Config log entries, not a separate RPC.
+use crate::raft::types::{Index, LogEntry, NodeId, Term};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireEnvelope {
+    pub correlation_id: u64,
+    pub msg: RaftMessage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RaftMessage {
+    RequestVote {
+        term: Term,
+        candidate_id: NodeId,
+        last_log_index: Index,
+        last_log_term: Term,
+    },
+    RequestVoteResp {
+        term: Term,
+        vote_granted: bool,
+    },
+    AppendEntries {
+        term: Term,
+        leader_id: NodeId,
+        prev_log_index: Index,
+        prev_log_term: Term,
+        entries: Vec<LogEntry>,
+        leader_commit: Index,
+    },
+    AppendEntriesResp {
+        term: Term,
+        success: bool,
+        match_index: Index,
+    },
+    InstallSnapshot {
+        term: Term,
+        leader_id: NodeId,
+        last_included_index: Index,
+        last_included_term: Term,
+        offset: u64,
+        data: Vec<u8>,
+        done: bool,
+    },
+    InstallSnapshotResp {
+        term: Term,
+    },
+}
