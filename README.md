@@ -9,6 +9,7 @@ Learning goal: understand Behaviour ↔ Handler lifecycle, substream framing, an
 
 **Docs**
 - libp2p fundamentals (connection → substream → protocol → Handler): [`docs/libp2p-fundamentals.md`](docs/libp2p-fundamentals.md)
+- Phase 1 (engine election + MemoryStorage): [`docs/phase-1.md`](docs/phase-1.md)
 - Design spec: [`docs/superpowers/specs/2026-07-23-libp2p-raft-design.md`](docs/superpowers/specs/2026-07-23-libp2p-raft-design.md)
 - Implementation plan: [`docs/superpowers/plans/2026-07-23-libp2p-raft.md`](docs/superpowers/plans/2026-07-23-libp2p-raft.md)
 
