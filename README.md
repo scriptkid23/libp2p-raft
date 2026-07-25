@@ -8,6 +8,7 @@ Learning / research crate: a **DIY mini-Raft** exposed as a rust-libp2p **`Netwo
 Learning goal: understand Behaviour ↔ Handler lifecycle, substream framing, and unary RPC plumbing end-to-end. Production code would often compose `request_response`; we hand-roll it on purpose.
 
 **Docs**
+- libp2p fundamentals (connection → substream → protocol → Handler): [`docs/libp2p-fundamentals.md`](docs/libp2p-fundamentals.md)
 - Design spec: [`docs/superpowers/specs/2026-07-23-libp2p-raft-design.md`](docs/superpowers/specs/2026-07-23-libp2p-raft-design.md)
 - Implementation plan: [`docs/superpowers/plans/2026-07-23-libp2p-raft.md`](docs/superpowers/plans/2026-07-23-libp2p-raft.md)
 
