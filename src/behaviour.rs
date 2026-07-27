@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use libp2p::core::transport::PortUse;
@@ -23,7 +23,7 @@ use crate::handler::{FromBehaviour, RaftHandler, ToBehaviour};
 use crate::peer_map::PeerMap;
 use crate::protocol::messages::RaftMessage;
 use crate::raft::engine::{Action, RaftEngine, RpcKind};
-use crate::raft::types::{NodeId, Role, Term};
+use crate::raft::types::{Index, LogEntry, NodeId, Role, Term};
 use crate::storage::Storage;
 
 #[derive(Debug)]
@@ -32,6 +32,9 @@ pub enum Event {
         role: Role,
         term: Term,
         leader: Option<NodeId>,
+    },
+    Committed {
+        entries: Vec<LogEntry>,
     },
     PeerMapped {
         peer: PeerId,
@@ -68,6 +71,7 @@ pub struct RaftBehaviour<S: Storage> {
     pending: HashMap<u64, PendingRequest>,
     inbound_channels: HashMap<u64, InboundChannel>,
     sleep: Pin<Box<Sleep>>,
+    waker: Option<Waker>,
 }
 
 impl<S: Storage + 'static> RaftBehaviour<S> {
@@ -92,6 +96,7 @@ impl<S: Storage + 'static> RaftBehaviour<S> {
             pending: HashMap::new(),
             inbound_channels: HashMap::new(),
             sleep: Box::pin(sleep(std::time::Duration::from_secs(0))),
+            waker: None,
         };
         behaviour.arm_sleep(next);
         behaviour
@@ -109,8 +114,23 @@ impl<S: Storage + 'static> RaftBehaviour<S> {
         self.engine.leader()
     }
 
+    pub fn commit_index(&self) -> Index {
+        self.engine.commit_index()
+    }
+
     pub fn peer_map(&self) -> &PeerMap {
         &self.peer_map
+    }
+
+    /// Propose a command on the Leader. Wakes the Behaviour poll loop to flush Actions.
+    pub fn propose(&mut self, data: Vec<u8>) -> Result<Index, Error> {
+        let (index, actions) = self.engine.propose(data)?;
+        self.execute_actions(actions, None);
+        self.arm_sleep(self.earliest_wake());
+        if let Some(w) = self.waker.take() {
+            w.wake();
+        }
+        Ok(index)
     }
 
     pub fn dial_seed(&mut self, peer: PeerId) {
@@ -213,13 +233,19 @@ impl<S: Storage + 'static> RaftBehaviour<S> {
                             leader: None,
                         }));
                 }
-                Action::Apply { .. } | Action::SnapshotInstallComplete { .. } => {}
+                Action::Apply { entries } => {
+                    self.pending_events
+                        .push_back(ToSwarm::GenerateEvent(Event::Committed { entries }));
+                }
+                Action::SnapshotInstallComplete { .. } => {}
             }
         }
     }
 
     fn send_rpc(&mut self, to: NodeId, msg: RaftMessage) {
+        let kind = Self::rpc_kind(&msg);
         let Some(peer) = self.peer_map.peer_id(to) else {
+            let _ = self.engine.handle_rpc_failure(to, kind);
             self.pending_events
                 .push_back(ToSwarm::GenerateEvent(Event::RpcFailed {
                     peer: PeerId::random(),
@@ -234,7 +260,8 @@ impl<S: Storage + 'static> RaftBehaviour<S> {
             .map(|c| !c.is_empty())
             .unwrap_or(false)
         {
-            // Dial; drop this RPC (lossy). Next tick/heartbeat will retry naturally.
+            // Dial; drop this RPC (lossy). Clear engine AE inflight so heartbeat can retry.
+            let _ = self.engine.handle_rpc_failure(to, kind);
             self.dial_seed(peer);
             self.pending_events
                 .push_back(ToSwarm::GenerateEvent(Event::RpcFailed {
@@ -246,7 +273,6 @@ impl<S: Storage + 'static> RaftBehaviour<S> {
 
         let correlation_id = self.next_correlation_id;
         self.next_correlation_id = self.next_correlation_id.wrapping_add(1);
-        let kind = Self::rpc_kind(&msg);
         self.pending.insert(
             correlation_id,
             PendingRequest {
@@ -432,6 +458,7 @@ impl<S: Storage + 'static> NetworkBehaviour for RaftBehaviour<S> {
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        self.waker = Some(cx.waker().clone());
         loop {
             if let Some(ev) = self.pending_events.pop_front() {
                 return Poll::Ready(ev);

@@ -20,6 +20,6 @@ pub use behaviour::{Event, RaftBehaviour};
 pub use config::{RaftConfig, SeedPeer};
 pub use error::{Error, RaftError, StorageError};
 pub use peer_map::PeerMap;
-pub use raft::types::{Index, NodeId, Role, Term};
+pub use raft::types::{EntryType, Index, LogEntry, NodeId, Role, Term};
 pub use raft::{Action, RaftEngine, RpcKind, TickOutcome};
 pub use storage::{MemoryStorage, Storage};

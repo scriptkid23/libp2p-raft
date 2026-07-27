@@ -11,7 +11,7 @@ use libp2p::identity::Keypair;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId, SwarmBuilder};
 use libp2p_raft::config::{RaftConfig, SeedPeer};
-use libp2p_raft::raft::types::Role;
+use libp2p_raft::raft::types::{EntryType, Role};
 use libp2p_raft::storage::MemoryStorage;
 use libp2p_raft::{Event, RaftBehaviour};
 use tracing_subscriber::EnvFilter;
@@ -90,22 +90,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let wall = Instant::now();
     let mut roles: HashMap<u64, (Role, u64)> = HashMap::new();
     let mut stable_since: Option<Instant> = None;
+    let mut proposed = false;
+    let mut committed_nodes: HashMap<u64, bool> = HashMap::new();
 
     let mut tick = tokio::time::interval(Duration::from_millis(50));
-    while wall.elapsed() < Duration::from_secs(15) {
+    while wall.elapsed() < Duration::from_secs(20) {
         tokio::select! {
-            ev = n1.swarm.select_next_some() => { handle_ev(1, ev, &mut roles, &mut stable_since); }
-            ev = n2.swarm.select_next_some() => { handle_ev(2, ev, &mut roles, &mut stable_since); }
-            ev = n3.swarm.select_next_some() => { handle_ev(3, ev, &mut roles, &mut stable_since); }
+            ev = n1.swarm.select_next_some() => {
+                handle_ev(1, ev, &mut roles, &mut stable_since, &mut committed_nodes);
+            }
+            ev = n2.swarm.select_next_some() => {
+                handle_ev(2, ev, &mut roles, &mut stable_since, &mut committed_nodes);
+            }
+            ev = n3.swarm.select_next_some() => {
+                handle_ev(3, ev, &mut roles, &mut stable_since, &mut committed_nodes);
+            }
             _ = tick.tick() => {
-                // Ensure behaviour timers are polled even when no SwarmEvent is pending.
-                drain_ready(1, &mut n1.swarm, &mut roles, &mut stable_since);
-                drain_ready(2, &mut n2.swarm, &mut roles, &mut stable_since);
-                drain_ready(3, &mut n3.swarm, &mut roles, &mut stable_since);
+                drain_ready(1, &mut n1.swarm, &mut roles, &mut stable_since, &mut committed_nodes);
+                drain_ready(2, &mut n2.swarm, &mut roles, &mut stable_since, &mut committed_nodes);
+                drain_ready(3, &mut n3.swarm, &mut roles, &mut stable_since, &mut committed_nodes);
             }
         }
 
-        // Sample current roles every loop (timers keep swarm progressing via select).
         roles.insert(1, (n1.swarm.behaviour().role(), n1.swarm.behaviour().current_term()));
         roles.insert(2, (n2.swarm.behaviour().role(), n2.swarm.behaviour().current_term()));
         roles.insert(3, (n3.swarm.behaviour().role(), n3.swarm.behaviour().current_term()));
@@ -116,9 +122,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     stable_since = Some(Instant::now());
                     println!("quorum ok term={term}: {:?}", roles);
                 }
-                if stable_since.unwrap().elapsed() >= Duration::from_secs(1) {
+                if !proposed && stable_since.unwrap().elapsed() >= Duration::from_secs(1) {
                     println!("stable leader for 1s: {:?}", roles);
-                    return Ok(());
+                    let leader_swarm = match roles.iter().find(|(_, (r, _))| matches!(r, Role::Leader)) {
+                        Some((1, _)) => &mut n1.swarm,
+                        Some((2, _)) => &mut n2.swarm,
+                        Some((3, _)) => &mut n3.swarm,
+                        _ => return Err("no leader to propose".into()),
+                    };
+                    let idx = leader_swarm.behaviour_mut().propose(b"hello".to_vec())?;
+                    println!("proposed hello at index={idx}");
+                    proposed = true;
                 }
             } else {
                 stable_since = None;
@@ -126,9 +140,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } else {
             stable_since = None;
         }
+
+        // Require Event::Committed carrying b"hello" on a majority (not commit_index alone).
+        if proposed && committed_nodes.values().filter(|c| **c).count() >= 2 {
+            println!(
+                "majority Committed hello: nodes={:?} commit_index=[{},{},{}]",
+                committed_nodes.keys().collect::<Vec<_>>(),
+                n1.swarm.behaviour().commit_index(),
+                n2.swarm.behaviour().commit_index(),
+                n3.swarm.behaviour().commit_index(),
+            );
+            return Ok(());
+        }
     }
 
-    Err(format!("no stable leader within timeout; last roles={roles:?}").into())
+    Err(format!(
+        "timeout; roles={roles:?} proposed={proposed} committed={committed_nodes:?}"
+    )
+    .into())
 }
 
 fn build_swarm(
@@ -172,11 +201,23 @@ fn handle_ev(
     ev: SwarmEvent<Event>,
     roles: &mut HashMap<u64, (Role, u64)>,
     stable_since: &mut Option<Instant>,
+    committed_nodes: &mut HashMap<u64, bool>,
 ) {
-    if let SwarmEvent::Behaviour(Event::RoleChanged { role, term, .. }) = ev {
-        println!("node {id} -> {role:?} term={term}");
-        roles.insert(id, (role, term));
-        *stable_since = None;
+    match ev {
+        SwarmEvent::Behaviour(Event::RoleChanged { role, term, .. }) => {
+            println!("node {id} -> {role:?} term={term}");
+            roles.insert(id, (role, term));
+            *stable_since = None;
+        }
+        SwarmEvent::Behaviour(Event::Committed { entries }) => {
+            if entries.iter().any(|e| {
+                matches!(&e.entry_type, EntryType::Command(d) if d == b"hello")
+            }) {
+                println!("node {id} Committed hello");
+                committed_nodes.insert(id, true);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -185,9 +226,10 @@ fn drain_ready(
     swarm: &mut libp2p::Swarm<RaftBehaviour<MemoryStorage>>,
     roles: &mut HashMap<u64, (Role, u64)>,
     stable_since: &mut Option<Instant>,
+    committed_nodes: &mut HashMap<u64, bool>,
 ) {
     while let Some(Some(ev)) = swarm.next().now_or_never() {
-        handle_ev(id, ev, roles, stable_since);
+        handle_ev(id, ev, roles, stable_since, committed_nodes);
     }
 }
 

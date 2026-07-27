@@ -204,7 +204,10 @@ impl<S: Storage> RaftEngine<S> {
         }
     }
 
-    pub fn handle_rpc_failure(&mut self, _to: NodeId, _kind: RpcKind) -> Vec<Action> {
+    pub fn handle_rpc_failure(&mut self, to: NodeId, kind: RpcKind) -> Vec<Action> {
+        if matches!(kind, RpcKind::AppendEntries) {
+            self.ae_inflight.remove(&to);
+        }
         Vec::new()
     }
 

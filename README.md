@@ -11,6 +11,7 @@ Learning goal: understand Behaviour ↔ Handler lifecycle, substream framing, an
 - libp2p fundamentals (connection → substream → protocol → Handler): [`docs/libp2p-fundamentals.md`](docs/libp2p-fundamentals.md)
 - Phase 1 (engine election + MemoryStorage): [`docs/phase-1.md`](docs/phase-1.md)
 - Phase 2 (election over libp2p): [`docs/phase-2.md`](docs/phase-2.md)
+- Phase 3 (replication + propose + commit): [`docs/phase-3.md`](docs/phase-3.md)
 - Design spec: [`docs/superpowers/specs/2026-07-23-libp2p-raft-design.md`](docs/superpowers/specs/2026-07-23-libp2p-raft-design.md)
 - Implementation plan: [`docs/superpowers/plans/2026-07-23-libp2p-raft.md`](docs/superpowers/plans/2026-07-23-libp2p-raft.md)
 - Phase 2 plan: [`docs/superpowers/plans/2026-07-27-phase-2-election-over-libp2p.md`](docs/superpowers/plans/2026-07-27-phase-2-election-over-libp2p.md)
@@ -200,7 +201,7 @@ tests/
 
 ## Status
 
-Design approved (incl. provider patch round). Implementation plan ready. Library code not fully scaffolded yet — follow the plan linked above.
+Phases 1–3 implemented: election over libp2p, log replication, `propose`, and `Event::Committed` (`three_node` commits a command). Next: Phase 4 snapshots.
 
 ## License
 
