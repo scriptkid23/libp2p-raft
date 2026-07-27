@@ -539,9 +539,13 @@ impl<S: Storage> RaftEngine<S> {
             // Invariant: next_index == match_index + 1 after success.
             self.next_index.insert(from, matched + 1);
             self.maybe_commit(&mut actions);
-            // Continue catching up if more entries remain.
-            if let Some(action) = self.send_append_entries_to(from) {
-                actions.push(action);
+            // Continue catching up only if log still has unsent entries.
+            let next = self.next_index.get(&from).copied().unwrap_or(1);
+            let (last, _) = self.storage.last_index_term();
+            if next <= last {
+                if let Some(action) = self.send_append_entries_to(from) {
+                    actions.push(action);
+                }
             }
         } else {
             let next = self.next_index.get(&from).copied().unwrap_or(1);
