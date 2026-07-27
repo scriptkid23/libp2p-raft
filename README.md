@@ -8,7 +8,7 @@ Learning / research crate: a **DIY mini-Raft** exposed as a rust-libp2p **`Netwo
 Learning goal: understand Behaviour ↔ Handler lifecycle, substream framing, and unary RPC plumbing end-to-end. Production code would often compose `request_response`; we hand-roll it on purpose.
 
 **Docs**
-- Handler → Behaviour → Engine architecture (mermaid + chi tiết): [`docs/handler-behaviour-engine.md`](docs/handler-behaviour-engine.md)
+- Handler → Behaviour → Engine architecture: [`docs/handler-behaviour-engine-en.md`](docs/handler-behaviour-engine-en.md) (EN) · [`docs/handler-behaviour-engine.md`](docs/handler-behaviour-engine.md) (VI)
 - libp2p fundamentals (connection → substream → protocol → Handler): [`docs/libp2p-fundamentals.md`](docs/libp2p-fundamentals.md)
 - Phase 1 (engine election + MemoryStorage): [`docs/phase-1.md`](docs/phase-1.md)
 - Phase 2 (election over libp2p): [`docs/phase-2.md`](docs/phase-2.md)

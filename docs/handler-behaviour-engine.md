@@ -4,7 +4,7 @@ Tài liệu chi tiết về ba tầng chính của crate `libp2p-raft`: cách `C
 
 **Nguồn mã:** `src/handler.rs`, `src/behaviour.rs`, `src/raft/engine.rs`, `src/protocol/messages.rs`
 
-**Liên quan:** [libp2p fundamentals](libp2p-fundamentals.md) (connection → substream → protocol), [design spec](superpowers/specs/2026-07-23-libp2p-raft-design.md)
+**Liên quan:** [libp2p fundamentals](libp2p-fundamentals.md) (connection → substream → protocol), [design spec](superpowers/specs/2026-07-23-libp2p-raft-design.md), [English version](handler-behaviour-engine-en.md)
 
 ---
 
