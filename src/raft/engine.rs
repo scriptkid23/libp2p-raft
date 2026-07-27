@@ -45,6 +45,8 @@ pub struct RaftEngine<S: Storage> {
     match_index: HashMap<NodeId, Index>,
     /// Last outbound AE per peer: (prev_log_index, entries_len) for stale-resp guards.
     last_ae: HashMap<NodeId, (Index, usize)>,
+    /// Pipeline depth 1: do not send another AE to a peer until its resp arrives.
+    ae_inflight: HashSet<NodeId>,
     commit_index: Index,
     last_applied: Index,
 }
@@ -66,6 +68,7 @@ impl<S: Storage> RaftEngine<S> {
             next_index: HashMap::new(),
             match_index: HashMap::new(),
             last_ae: HashMap::new(),
+            ae_inflight: HashSet::new(),
             commit_index: 0,
             last_applied: 0,
         }
@@ -255,6 +258,7 @@ impl<S: Storage> RaftEngine<S> {
         self.next_index.clear();
         self.match_index.clear();
         self.last_ae.clear();
+        self.ae_inflight.clear();
 
         actions.push(Action::BecomeFollower { term, leader });
     }
@@ -268,6 +272,7 @@ impl<S: Storage> RaftEngine<S> {
         self.next_index.clear();
         self.match_index.clear();
         self.last_ae.clear();
+        self.ae_inflight.clear();
         for voter in self.membership.voters() {
             if *voter != self.config.node_id {
                 self.next_index.insert(*voter, last_index + 1);
@@ -524,9 +529,10 @@ impl<S: Storage> RaftEngine<S> {
         let Some(&(req_prev, req_len)) = self.last_ae.get(&from) else {
             return actions;
         };
+        self.ae_inflight.remove(&from);
 
         if success {
-            // Derive match from our request record (not follower-reported index).
+            // With pipeline depth 1, last_ae uniquely identifies this RPC.
             let matched = req_prev + req_len as Index;
             let cur = self.match_index.get(&from).copied().unwrap_or(0);
             // match_index is monotonic — stale success must not regress.
@@ -534,6 +540,10 @@ impl<S: Storage> RaftEngine<S> {
             // Invariant: next_index == match_index + 1 after success.
             self.next_index.insert(from, matched + 1);
             self.maybe_commit(&mut actions);
+            // Continue catching up if more entries remain.
+            if let Some(action) = self.send_append_entries_to(from) {
+                actions.push(action);
+            }
         } else {
             let next = self.next_index.get(&from).copied().unwrap_or(1);
             // Stale reject: only apply if next_index still matches this request.
@@ -562,8 +572,12 @@ impl<S: Storage> RaftEngine<S> {
     }
 
     fn send_append_entries_to(&mut self, to: NodeId) -> Option<Action> {
+        if self.ae_inflight.contains(&to) {
+            return None;
+        }
         let (msg, prev, len) = self.build_append_entries(to)?;
         self.last_ae.insert(to, (prev, len));
+        self.ae_inflight.insert(to);
         Some(Action::Send { to, msg })
     }
 
