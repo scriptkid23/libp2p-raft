@@ -87,6 +87,14 @@ impl<S: Storage> RaftEngine<S> {
         self.membership.other_voters(self.config.node_id)
     }
 
+    pub fn commit_index(&self) -> Index {
+        self.commit_index
+    }
+
+    pub fn last_applied(&self) -> Index {
+        self.last_applied
+    }
+
     pub fn next_deadline(&self) -> Instant {
         match self.role {
             Role::Leader => self.heartbeat_deadline.min(self.election_deadline),
@@ -145,7 +153,7 @@ impl<S: Storage> RaftEngine<S> {
                 prev_log_index,
                 prev_log_term,
                 entries,
-                leader_commit: _,
+                leader_commit,
             } => self.handle_append_entries(
                 from,
                 term,
@@ -153,6 +161,7 @@ impl<S: Storage> RaftEngine<S> {
                 prev_log_index,
                 prev_log_term,
                 entries,
+                leader_commit,
                 now,
             ),
             RaftMessage::AppendEntriesResp { term, .. } => {
@@ -338,11 +347,12 @@ impl<S: Storage> RaftEngine<S> {
         prev_log_index: Index,
         prev_log_term: Term,
         entries: Vec<LogEntry>,
+        leader_commit: Index,
         now: Instant,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         let current_term = self.current_term();
-        let (last_index, last_term) = self.storage.last_index_term();
+        let (last_index, _) = self.storage.last_index_term();
 
         if term < current_term {
             actions.push(Action::Send {
@@ -364,32 +374,94 @@ impl<S: Storage> RaftEngine<S> {
             self.leader = Some(leader_id);
         }
 
+        // Legitimate leader contact: reset deadline even if prev_log fails.
         self.reset_election_deadline(now);
 
-        // Phase 2: reject non-empty replication; accept empty heartbeats when log prefix matches.
-        let prefix_ok = if prev_log_index == 0 {
+        let prev_ok = if prev_log_index == 0 {
             prev_log_term == 0
         } else {
             self.storage
                 .entry(prev_log_index)
                 .map(|e| e.term == prev_log_term)
                 .unwrap_or(false)
-                || (prev_log_index == last_index && prev_log_term == last_term)
         };
 
-        let success = entries.is_empty() && prefix_ok;
-        let match_index = if success { last_index } else { last_index };
+        if !prev_ok {
+            let (last_index, _) = self.storage.last_index_term();
+            actions.push(Action::Send {
+                to: from,
+                msg: RaftMessage::AppendEntriesResp {
+                    term: self.current_term(),
+                    success: false,
+                    match_index: last_index,
+                },
+            });
+            return actions;
+        }
+
+        // Conditional truncate + append: skip identical prefix; truncate only on conflict.
+        let mut append_from = 0usize;
+        for (i, e) in entries.iter().enumerate() {
+            let idx = prev_log_index + 1 + i as Index;
+            match self.storage.entry(idx) {
+                Some(existing) if existing.term == e.term => {
+                    append_from = i + 1;
+                }
+                Some(_) => {
+                    self.storage.truncate_from(idx);
+                    append_from = i;
+                    break;
+                }
+                None => {
+                    append_from = i;
+                    break;
+                }
+            }
+        }
+
+        if append_from < entries.len() {
+            let _ = self.storage.persist(None, &entries[append_from..]);
+        }
+
+        // last_new = index of last new entry in this RPC (Raft Fig. 2).
+        let last_new = prev_log_index + entries.len() as Index;
+        self.advance_commit_and_apply(leader_commit, last_new, &mut actions);
 
         actions.push(Action::Send {
             to: from,
             msg: RaftMessage::AppendEntriesResp {
                 term: self.current_term(),
-                success,
-                match_index,
+                success: true,
+                match_index: last_new,
             },
         });
 
         actions
+    }
+
+    fn advance_commit_and_apply(
+        &mut self,
+        leader_commit: Index,
+        last_new: Index,
+        actions: &mut Vec<Action>,
+    ) {
+        let new_commit = leader_commit.min(last_new);
+        if new_commit > self.commit_index {
+            self.commit_index = new_commit;
+        }
+        if self.commit_index <= self.last_applied {
+            return;
+        }
+        let mut entries = Vec::new();
+        for i in (self.last_applied + 1)..=self.commit_index {
+            if let Some(e) = self.storage.entry(i) {
+                entries.push(e);
+            }
+        }
+        self.last_applied = self.commit_index;
+        if !entries.is_empty() {
+            actions.push(Action::Apply { entries });
+        }
     }
 
     fn handle_append_entries_resp(&mut self, term: Term, _now: Instant) -> Vec<Action> {

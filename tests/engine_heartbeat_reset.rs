@@ -86,6 +86,55 @@ fn stale_term_ae_does_not_reset_deadline() {
 }
 
 #[test]
+fn empty_ae_mismatched_prev_rejects_but_resets_deadline() {
+    let mut eng = RaftEngine::new(cfg(1), MemoryStorage::new());
+    let t0 = Instant::now();
+    // Seed log so prev_log_index=1 is required for non-zero prev.
+    let _ = eng.handle_rpc(
+        2,
+        RaftMessage::AppendEntries {
+            term: 1,
+            leader_id: 2,
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries: vec![libp2p_raft::raft::types::LogEntry {
+                index: 1,
+                term: 1,
+                entry_type: libp2p_raft::raft::types::EntryType::Command(b"a".to_vec()),
+            }],
+            leader_commit: 0,
+        },
+        t0,
+    );
+    let actions = eng.handle_rpc(
+        2,
+        RaftMessage::AppendEntries {
+            term: 1,
+            leader_id: 2,
+            prev_log_index: 1,
+            prev_log_term: 99,
+            entries: vec![],
+            leader_commit: 0,
+        },
+        t0 + Duration::from_millis(10),
+    );
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        Action::Send {
+            msg: RaftMessage::AppendEntriesResp {
+                success: false,
+                ..
+            },
+            ..
+        }
+    )));
+    // Deadline was reset at t0+10 → tick at t0+100 must not elect.
+    let out = eng.tick(t0 + Duration::from_millis(100));
+    assert!(matches!(eng.role(), Role::Follower));
+    assert!(out.actions.is_empty());
+}
+
+#[test]
 fn duplicate_vote_resp_does_not_double_count() {
     let mut eng = RaftEngine::new(cfg(1), MemoryStorage::new());
     let t0 = Instant::now();
