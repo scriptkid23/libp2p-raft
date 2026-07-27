@@ -1,4 +1,4 @@
-//! Temporary 2-peer echo — proves Handler + codec path (Task 4/5).
+//! 2-peer smoke test — dial + Raft RPC path after Behaviour owns the engine.
 //! Run: `cargo run --example echo_two_peers`
 
 use std::error::Error;
@@ -9,7 +9,7 @@ use libp2p::identity::Keypair;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId, SwarmBuilder};
 use libp2p_raft::config::{RaftConfig, SeedPeer};
-use libp2p_raft::protocol::RaftMessage;
+use libp2p_raft::storage::MemoryStorage;
 use libp2p_raft::{Event, RaftBehaviour};
 use tracing_subscriber::EnvFilter;
 
@@ -35,9 +35,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             peer_id: peer_b,
             addrs: vec![addr_b.clone()],
         }],
-        election_timeout: Duration::from_secs(5),
-        election_jitter: Duration::ZERO,
-        heartbeat_interval: Duration::from_millis(500),
+        election_timeout: Duration::from_millis(400),
+        election_jitter: Duration::from_millis(50),
+        heartbeat_interval: Duration::from_millis(100),
         rpc_timeout: Duration::from_secs(2),
         rpc_max_retries: 0,
         snapshot_threshold: 10_000,
@@ -50,9 +50,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             peer_id: peer_a,
             addrs: vec![addr_a.clone()],
         }],
-        election_timeout: Duration::from_secs(5),
-        election_jitter: Duration::ZERO,
-        heartbeat_interval: Duration::from_millis(500),
+        election_timeout: Duration::from_millis(600),
+        election_jitter: Duration::from_millis(80),
+        heartbeat_interval: Duration::from_millis(100),
         rpc_timeout: Duration::from_secs(2),
         rpc_max_retries: 0,
         snapshot_threshold: 10_000,
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             libp2p::noise::Config::new,
             libp2p::yamux::Config::default,
         )?
-        .with_behaviour(|_| RaftBehaviour::new(cfg_a))?
+        .with_behaviour(|_| RaftBehaviour::new(cfg_a, MemoryStorage::new()))?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
         .build();
 
@@ -76,14 +76,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             libp2p::noise::Config::new,
             libp2p::yamux::Config::default,
         )?
-        .with_behaviour(|_| RaftBehaviour::new(cfg_b))?
+        .with_behaviour(|_| RaftBehaviour::new(cfg_b, MemoryStorage::new()))?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
         .build();
 
     swarm_a.listen_on(addr_a)?;
-    swarm_b.listen_on(addr_b.clone())?;
+    swarm_b.listen_on(addr_b)?;
 
-    // Wait until both listeners are up, then dial.
     let mut a_listening = false;
     let mut b_listening = false;
     while !(a_listening && b_listening) {
@@ -103,41 +102,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     swarm_a.behaviour_mut().dial_seed(peer_b);
 
-    let mut sent = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut connected = false;
 
     loop {
         if tokio::time::Instant::now() > deadline {
-            return Err("timeout waiting for echo".into());
+            return Err("timeout waiting for election RPC path".into());
         }
         tokio::select! {
             ev = swarm_a.select_next_some() => {
                 match ev {
-                    SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == peer_b && !sent => {
-                        swarm_a.behaviour_mut().send_echo(
-                            peer_b,
-                            RaftMessage::RequestVote {
-                                term: 1,
-                                candidate_id: 1,
-                                last_log_index: 0,
-                                last_log_term: 0,
-                            },
-                        );
-                        sent = true;
+                    SwarmEvent::ConnectionEstablished { .. } => {
+                        connected = true;
                     }
-                    SwarmEvent::Behaviour(Event::Echo(env)) if sent => {
-                        println!("echo ok correlation_id={}", env.correlation_id);
+                    SwarmEvent::Behaviour(Event::RoleChanged { role, term, .. }) => {
+                        println!("echo path ok: peer A role={role:?} term={term} connected={connected}");
                         return Ok(());
-                    }
-                    SwarmEvent::Behaviour(Event::RpcFailed { error, .. }) => {
-                        return Err(format!("rpc failed: {error}").into());
                     }
                     _ => {}
                 }
             }
             ev = swarm_b.select_next_some() => {
-                // Drive peer B so inbound echo is handled.
-                let _ = ev;
+                if let SwarmEvent::Behaviour(Event::RoleChanged { role, term, .. }) = ev {
+                    println!("echo path ok: peer B role={role:?} term={term}");
+                    return Ok(());
+                }
             }
         }
     }

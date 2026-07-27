@@ -71,6 +71,22 @@ impl<S: Storage> RaftEngine<S> {
         self.role
     }
 
+    pub fn current_term(&self) -> Term {
+        self.storage.hard_state().current_term
+    }
+
+    pub fn leader(&self) -> Option<NodeId> {
+        self.leader
+    }
+
+    pub fn node_id(&self) -> NodeId {
+        self.config.node_id
+    }
+
+    pub fn other_voters(&self) -> Vec<NodeId> {
+        self.membership.other_voters(self.config.node_id)
+    }
+
     pub fn next_deadline(&self) -> Instant {
         match self.role {
             Role::Leader => self.heartbeat_deadline.min(self.election_deadline),
@@ -148,10 +164,6 @@ impl<S: Storage> RaftEngine<S> {
 
     pub fn handle_rpc_failure(&mut self, _to: NodeId, _kind: RpcKind) -> Vec<Action> {
         Vec::new()
-    }
-
-    fn current_term(&self) -> Term {
-        self.storage.hard_state().current_term
     }
 
     fn start_election(&mut self, now: Instant) -> Vec<Action> {
