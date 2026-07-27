@@ -180,6 +180,86 @@ fn follower_duplicate_prefix_does_not_truncate() {
 }
 
 #[test]
+fn follower_mid_batch_conflict_truncates_from_conflict_only() {
+    let mut storage = MemoryStorage::new();
+    storage
+        .persist(None, &[entry(1, 1, b"a"), entry(2, 1, b"old"), entry(3, 1, b"z")])
+        .unwrap();
+    let mut eng = RaftEngine::new(cfg(1), storage);
+    let t0 = Instant::now();
+
+    let actions = eng.handle_rpc(
+        2,
+        RaftMessage::AppendEntries {
+            term: 2,
+            leader_id: 2,
+            prev_log_index: 1,
+            prev_log_term: 1,
+            entries: vec![entry(2, 2, b"new"), entry(3, 2, b"n2")],
+            leader_commit: 0,
+        },
+        t0,
+    );
+
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        Action::Send {
+            msg: RaftMessage::AppendEntriesResp {
+                success: true,
+                match_index: 3,
+                ..
+            },
+            ..
+        }
+    )));
+
+    // Index 1 preserved; 2.. rewritten. Verify via empty AE at prev=3 term=2.
+    let actions = eng.handle_rpc(
+        2,
+        RaftMessage::AppendEntries {
+            term: 2,
+            leader_id: 2,
+            prev_log_index: 3,
+            prev_log_term: 2,
+            entries: vec![],
+            leader_commit: 0,
+        },
+        t0 + Duration::from_millis(1),
+    );
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        Action::Send {
+            msg: RaftMessage::AppendEntriesResp {
+                success: true,
+                match_index: 3,
+                ..
+            },
+            ..
+        }
+    )));
+}
+
+#[test]
+fn follower_commit_clamps_to_last_new() {
+    let mut eng = RaftEngine::new(cfg(1), MemoryStorage::new());
+    let t0 = Instant::now();
+    let _ = eng.handle_rpc(
+        2,
+        RaftMessage::AppendEntries {
+            term: 1,
+            leader_id: 2,
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries: vec![entry(1, 1, b"only")],
+            leader_commit: 99, // ahead of last_new
+        },
+        t0,
+    );
+    assert_eq!(eng.commit_index(), 1);
+    assert_eq!(eng.last_applied(), 1);
+}
+
+#[test]
 #[ignore = "Task 2: leader propose/commit not implemented yet"]
 fn leader_appends_and_commits_after_majority_match() {
     unimplemented!("Task 2")

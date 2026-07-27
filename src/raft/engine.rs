@@ -408,6 +408,8 @@ impl<S: Storage> RaftEngine<S> {
                     append_from = i + 1;
                 }
                 Some(_) => {
+                    // Never truncate committed entries (safety net).
+                    debug_assert!(idx > self.commit_index);
                     self.storage.truncate_from(idx);
                     append_from = i;
                     break;
@@ -419,12 +421,14 @@ impl<S: Storage> RaftEngine<S> {
             }
         }
 
+        // Durability barrier (MemoryStorage is sync): persist before success response.
         if append_from < entries.len() {
             let _ = self.storage.persist(None, &entries[append_from..]);
         }
 
         // last_new = index of last new entry in this RPC (Raft Fig. 2).
         let last_new = prev_log_index + entries.len() as Index;
+        // commit_index is monotonic — stale/reordered AE must not regress it.
         self.advance_commit_and_apply(leader_commit, last_new, &mut actions);
 
         actions.push(Action::Send {
