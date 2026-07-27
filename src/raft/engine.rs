@@ -105,7 +105,7 @@ impl<S: Storage> RaftEngine<S> {
         }
     }
 
-    pub fn handle_rpc(&mut self, from: NodeId, msg: RaftMessage) -> Vec<Action> {
+    pub fn handle_rpc(&mut self, from: NodeId, msg: RaftMessage, now: Instant) -> Vec<Action> {
         match msg {
             RaftMessage::RequestVote {
                 term,
@@ -118,9 +118,29 @@ impl<S: Storage> RaftEngine<S> {
                 candidate_id,
                 last_log_index,
                 last_log_term,
+                now,
             ),
             RaftMessage::RequestVoteResp { term, vote_granted } => {
-                self.handle_request_vote_resp(from, term, vote_granted)
+                self.handle_request_vote_resp(from, term, vote_granted, now)
+            }
+            RaftMessage::AppendEntries {
+                term,
+                leader_id,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit: _,
+            } => self.handle_append_entries(
+                from,
+                term,
+                leader_id,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                now,
+            ),
+            RaftMessage::AppendEntriesResp { term, .. } => {
+                self.handle_append_entries_resp(term, now)
             }
             _ => Vec::new(),
         }
@@ -219,9 +239,9 @@ impl<S: Storage> RaftEngine<S> {
         candidate_id: NodeId,
         last_log_index: Index,
         last_log_term: Term,
+        now: Instant,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
-        let now = Instant::now();
         let current_term = self.current_term();
 
         if term < current_term {
@@ -272,9 +292,9 @@ impl<S: Storage> RaftEngine<S> {
         from: NodeId,
         term: Term,
         vote_granted: bool,
+        now: Instant,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
-        let now = Instant::now();
         let current_term = self.current_term();
 
         if term < current_term {
@@ -295,6 +315,77 @@ impl<S: Storage> RaftEngine<S> {
             self.become_leader(term, now, &mut actions);
         }
 
+        actions
+    }
+
+    fn handle_append_entries(
+        &mut self,
+        from: NodeId,
+        term: Term,
+        leader_id: NodeId,
+        prev_log_index: Index,
+        prev_log_term: Term,
+        entries: Vec<LogEntry>,
+        now: Instant,
+    ) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let current_term = self.current_term();
+        let (last_index, last_term) = self.storage.last_index_term();
+
+        if term < current_term {
+            actions.push(Action::Send {
+                to: from,
+                msg: RaftMessage::AppendEntriesResp {
+                    term: current_term,
+                    success: false,
+                    match_index: last_index,
+                },
+            });
+            return actions;
+        }
+
+        if term > current_term {
+            self.become_follower(term, Some(leader_id), &mut actions);
+        } else if self.role != Role::Follower {
+            self.become_follower(term, Some(leader_id), &mut actions);
+        } else {
+            self.leader = Some(leader_id);
+        }
+
+        self.reset_election_deadline(now);
+
+        // Phase 2: reject non-empty replication; accept empty heartbeats when log prefix matches.
+        let prefix_ok = if prev_log_index == 0 {
+            prev_log_term == 0
+        } else {
+            self.storage
+                .entry(prev_log_index)
+                .map(|e| e.term == prev_log_term)
+                .unwrap_or(false)
+                || (prev_log_index == last_index && prev_log_term == last_term)
+        };
+
+        let success = entries.is_empty() && prefix_ok;
+        let match_index = if success { last_index } else { last_index };
+
+        actions.push(Action::Send {
+            to: from,
+            msg: RaftMessage::AppendEntriesResp {
+                term: self.current_term(),
+                success,
+                match_index,
+            },
+        });
+
+        actions
+    }
+
+    fn handle_append_entries_resp(&mut self, term: Term, _now: Instant) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let current_term = self.current_term();
+        if term > current_term {
+            self.become_follower(term, None, &mut actions);
+        }
         actions
     }
 
