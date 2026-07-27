@@ -284,8 +284,7 @@ impl<S: Storage> RaftEngine<S> {
         self.reset_election_deadline(now);
 
         actions.push(Action::BecomeLeader { term });
-        // Catch followers up promptly (same builder as heartbeat).
-        actions.extend(self.replicate_actions());
+        // Replication starts on propose / heartbeat tick (pipeline depth 1).
     }
 
     fn reset_election_deadline(&mut self, now: Instant) {
