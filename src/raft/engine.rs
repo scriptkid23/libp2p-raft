@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::config::RaftConfig;
+use crate::error::RaftError;
 use crate::protocol::messages::RaftMessage;
 use crate::raft::log::log_is_up_to_date;
 use crate::raft::membership::Membership;
-use crate::raft::types::{HardState, Index, LogEntry, NodeId, Role, Term};
+use crate::raft::types::{EntryType, HardState, Index, LogEntry, NodeId, Role, Term};
 use crate::storage::Storage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +43,8 @@ pub struct RaftEngine<S: Storage> {
     membership: Membership,
     next_index: HashMap<NodeId, Index>,
     match_index: HashMap<NodeId, Index>,
+    /// Last outbound AE per peer: (prev_log_index, entries_len) for stale-resp guards.
+    last_ae: HashMap<NodeId, (Index, usize)>,
     commit_index: Index,
     last_applied: Index,
 }
@@ -62,9 +65,34 @@ impl<S: Storage> RaftEngine<S> {
             membership,
             next_index: HashMap::new(),
             match_index: HashMap::new(),
+            last_ae: HashMap::new(),
             commit_index: 0,
             last_applied: 0,
         }
+    }
+
+    /// Append a command on the Leader and return replicate Actions.
+    pub fn propose(&mut self, data: Vec<u8>) -> Result<(Index, Vec<Action>), RaftError> {
+        if self.role != Role::Leader {
+            return Err(RaftError::NotLeader);
+        }
+        let (last, _) = self.storage.last_index_term();
+        let index = last + 1;
+        let entry = LogEntry {
+            index,
+            term: self.current_term(),
+            entry_type: EntryType::Command(data),
+        };
+        let _ = self.storage.persist(None, &[entry]);
+        Ok((index, self.replicate_actions()))
+    }
+
+    pub fn next_index(&self, peer: NodeId) -> Option<Index> {
+        self.next_index.get(&peer).copied()
+    }
+
+    pub fn match_index(&self, peer: NodeId) -> Option<Index> {
+        self.match_index.get(&peer).copied()
     }
 
     pub fn role(&self) -> Role {
@@ -117,7 +145,7 @@ impl<S: Storage> RaftEngine<S> {
                 actions.extend(self.start_election(now));
             }
             Role::Leader if now >= self.heartbeat_deadline => {
-                actions.extend(self.send_heartbeats());
+                actions.extend(self.replicate_actions());
                 self.heartbeat_deadline = now + self.config.heartbeat_interval;
             }
             _ => {}
@@ -164,9 +192,11 @@ impl<S: Storage> RaftEngine<S> {
                 leader_commit,
                 now,
             ),
-            RaftMessage::AppendEntriesResp { term, .. } => {
-                self.handle_append_entries_resp(term, now)
-            }
+            RaftMessage::AppendEntriesResp {
+                term,
+                success,
+                match_index,
+            } => self.handle_append_entries_resp(from, term, success, match_index, now),
             _ => Vec::new(),
         }
     }
@@ -224,6 +254,7 @@ impl<S: Storage> RaftEngine<S> {
         self.votes.clear();
         self.next_index.clear();
         self.match_index.clear();
+        self.last_ae.clear();
 
         actions.push(Action::BecomeFollower { term, leader });
     }
@@ -236,6 +267,7 @@ impl<S: Storage> RaftEngine<S> {
         let (last_index, _) = self.storage.last_index_term();
         self.next_index.clear();
         self.match_index.clear();
+        self.last_ae.clear();
         for voter in self.membership.voters() {
             if *voter != self.config.node_id {
                 self.next_index.insert(*voter, last_index + 1);
@@ -247,6 +279,8 @@ impl<S: Storage> RaftEngine<S> {
         self.reset_election_deadline(now);
 
         actions.push(Action::BecomeLeader { term });
+        // Catch followers up promptly (same builder as heartbeat).
+        actions.extend(self.replicate_actions());
     }
 
     fn reset_election_deadline(&mut self, now: Instant) {
@@ -468,36 +502,133 @@ impl<S: Storage> RaftEngine<S> {
         }
     }
 
-    fn handle_append_entries_resp(&mut self, term: Term, _now: Instant) -> Vec<Action> {
+    fn handle_append_entries_resp(
+        &mut self,
+        from: NodeId,
+        term: Term,
+        success: bool,
+        _match_index: Index,
+        _now: Instant,
+    ) -> Vec<Action> {
         let mut actions = Vec::new();
         let current_term = self.current_term();
+
         if term > current_term {
             self.become_follower(term, None, &mut actions);
+            return actions;
+        }
+        if self.role != Role::Leader || term != current_term {
+            return actions;
+        }
+
+        let Some(&(req_prev, req_len)) = self.last_ae.get(&from) else {
+            return actions;
+        };
+
+        if success {
+            // Derive match from our request record (not follower-reported index).
+            let matched = req_prev + req_len as Index;
+            let cur = self.match_index.get(&from).copied().unwrap_or(0);
+            // match_index is monotonic — stale success must not regress.
+            self.match_index.insert(from, cur.max(matched));
+            // Invariant: next_index == match_index + 1 after success.
+            self.next_index.insert(from, matched + 1);
+            self.maybe_commit(&mut actions);
+        } else {
+            let next = self.next_index.get(&from).copied().unwrap_or(1);
+            // Stale reject: only apply if next_index still matches this request.
+            if next != req_prev + 1 {
+                return actions;
+            }
+            let match_i = self.match_index.get(&from).copied().unwrap_or(0);
+            let new_next = next.saturating_sub(1).max(match_i + 1).max(1);
+            self.next_index.insert(from, new_next);
+            if let Some(action) = self.send_append_entries_to(from) {
+                actions.push(action);
+            }
+        }
+
+        actions
+    }
+
+    fn replicate_actions(&mut self) -> Vec<Action> {
+        let mut actions = Vec::new();
+        for peer in self.other_voters() {
+            if let Some(action) = self.send_append_entries_to(peer) {
+                actions.push(action);
+            }
         }
         actions
     }
 
-    fn send_heartbeats(&self) -> Vec<Action> {
-        let term = self.current_term();
-        let (last_index, last_term) = self.storage.last_index_term();
-        let prev_log_term = if last_index > 0 {
-            self.storage
-                .entry(last_index)
-                .map(|e| e.term)
-                .unwrap_or(last_term)
-        } else {
-            0
-        };
+    fn send_append_entries_to(&mut self, to: NodeId) -> Option<Action> {
+        let (msg, prev, len) = self.build_append_entries(to)?;
+        self.last_ae.insert(to, (prev, len));
+        Some(Action::Send { to, msg })
+    }
 
-        vec![Action::Broadcast {
-            msg: RaftMessage::AppendEntries {
-                term,
+    fn build_append_entries(&self, to: NodeId) -> Option<(RaftMessage, Index, usize)> {
+        let next = *self.next_index.get(&to)?;
+        let prev_log_index = next.saturating_sub(1);
+        let prev_log_term = if prev_log_index == 0 {
+            0
+        } else {
+            self.storage.entry(prev_log_index)?.term
+        };
+        let (last_index, _) = self.storage.last_index_term();
+        let mut entries = Vec::new();
+        let mut idx = next;
+        while idx <= last_index {
+            entries.push(self.storage.entry(idx)?);
+            idx += 1;
+        }
+        let entries_len = entries.len();
+        Some((
+            RaftMessage::AppendEntries {
+                term: self.current_term(),
                 leader_id: self.config.node_id,
-                prev_log_index: last_index,
+                prev_log_index,
                 prev_log_term,
-                entries: Vec::new(),
+                entries,
                 leader_commit: self.commit_index,
             },
-        }]
+            prev_log_index,
+            entries_len,
+        ))
+    }
+
+    fn maybe_commit(&mut self, actions: &mut Vec<Action>) {
+        let (last_index, _) = self.storage.last_index_term();
+        let term = self.current_term();
+        let quorum = self.membership.quorum();
+
+        // Scan high→low; only current-term entries may advance commit (Fig. 8).
+        let mut new_commit = self.commit_index;
+        let start = self.commit_index.saturating_add(1);
+        if start > last_index {
+            return;
+        }
+        for n in (start..=last_index).rev() {
+            let Some(e) = self.storage.entry(n) else {
+                continue;
+            };
+            if e.term != term {
+                continue;
+            }
+            let mut count = 1; // self
+            for peer in self.other_voters() {
+                if self.match_index.get(&peer).copied().unwrap_or(0) >= n {
+                    count += 1;
+                }
+            }
+            if count >= quorum {
+                new_commit = n;
+                break;
+            }
+        }
+
+        if new_commit > self.commit_index {
+            self.advance_commit_and_apply(new_commit, new_commit, actions);
+        }
     }
 }
