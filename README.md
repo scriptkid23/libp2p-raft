@@ -176,19 +176,38 @@ Engine holds absolute deadlines. Behaviour resets a deadline timer after state-c
 src/
   behaviour.rs   # NetworkBehaviour adapter
   handler.rs     # ConnectionHandler
+  cluster_config.rs · node_identity.rs
   peer_map.rs · config.rs · error.rs
   protocol/      # messages, codec, upgrade
   raft/          # engine, types, log, snapshot, membership
   storage/       # trait + MemoryStorage
   bin/
-    raft-node.rs # deployable single-node binary (Docker / multi-process)
+    raft-node.rs # deployable single-node binary
+config/
+  cluster.local.toml   # 3-node localhost topology
+  cluster.docker.toml  # 6-node Docker static IPs
 examples/
   three_node.rs  # in-process 3-node demo
   echo_two_peers.rs
+scripts/
+  run-cluster.ps1 · run-cluster.sh
 tests/
-  engine_*.rs    # pure engine tests (no Swarm) — engine is independently unit-testable
-  codec_roundtrip.rs
+  engine_*.rs · cluster_config.rs
 ```
+
+### Running a multi-node cluster
+
+**One TOML file** defines voters + all nodes (`id`, `host`, `port`). Each process only needs `NODE_ID`.
+
+| Target | Config | Command |
+|--------|--------|---------|
+| Local 3-node | `config/cluster.local.toml` | `.\scripts\run-cluster.ps1` |
+| Docker 6-node | `config/cluster.docker.toml` | `docker compose up --build` |
+| Single node | same config | `NODE_ID=1 cargo run --bin raft-node` |
+
+List node ids from config: `cargo run --bin raft-node -- --list-nodes`
+
+Legacy env (`RAFT_PEERS`, `RAFT_VOTERS`) still works if no cluster file is present.
 
 ### Implementation phases
 

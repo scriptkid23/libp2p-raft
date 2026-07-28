@@ -1,0 +1,35 @@
+# 6-node Docker cluster (static bridge IPs — must match docker-compose.yml).
+# Run: docker compose up --build
+
+voters = [1, 2, 3, 4, 5, 6]
+propose_hello_node = 1
+
+[[nodes]]
+id = 1
+host = "172.28.0.11"
+port = 4101
+
+[[nodes]]
+id = 2
+host = "172.28.0.12"
+port = 4102
+
+[[nodes]]
+id = 3
+host = "172.28.0.13"
+port = 4103
+
+[[nodes]]
+id = 4
+host = "172.28.0.14"
+port = 4104
+
+[[nodes]]
+id = 5
+host = "172.28.0.15"
+port = 4105
+
+[[nodes]]
+id = 6
+host = "172.28.0.16"
+port = 4106

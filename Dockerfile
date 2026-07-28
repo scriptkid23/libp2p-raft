@@ -4,7 +4,7 @@ FROM rust:1-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY examples ./examples
+COPY config ./config
 RUN cargo build --release --bin raft-node
 
 FROM debian:bookworm-slim

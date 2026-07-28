@@ -1,23 +1,25 @@
-# 3-node Raft cluster over libp2p.
+# 6-node Raft cluster — topology in config/cluster.docker.toml
 #
 #   docker compose up --build
 #
-# 5-node cluster:
-#   docker compose -f docker-compose.5.yml up --build
-#
-# node1 proposes "hello" when it becomes leader (PROPOSE_HELLO=1).
-# Static IPs avoid Docker DNS race at startup.
+# Only NODE_ID differs per service; voters/peers/ports come from the shared TOML.
+
+x-node: &node
+  build: .
+  volumes:
+    - ./config/cluster.docker.toml:/etc/raft/cluster.toml:ro
+  environment: &node-env
+    CLUSTER_CONFIG: /etc/raft/cluster.toml
+    RUST_LOG: info
+  networks:
+    - raft
 
 services:
   node1:
-    build: .
+    <<: *node
     environment:
+      <<: *node-env
       NODE_ID: "1"
-      LISTEN_PORT: "4101"
-      RAFT_VOTERS: "1,2,3"
-      RAFT_PEERS: "2:172.28.0.12:4102,3:172.28.0.13:4103"
-      PROPOSE_HELLO: "1"
-      RUST_LOG: info
     ports:
       - "4101:4101"
     networks:
@@ -25,13 +27,10 @@ services:
         ipv4_address: 172.28.0.11
 
   node2:
-    build: .
+    <<: *node
     environment:
+      <<: *node-env
       NODE_ID: "2"
-      LISTEN_PORT: "4102"
-      RAFT_VOTERS: "1,2,3"
-      RAFT_PEERS: "1:172.28.0.11:4101,3:172.28.0.13:4103"
-      RUST_LOG: info
     ports:
       - "4102:4102"
     networks:
@@ -41,21 +40,56 @@ services:
       - node1
 
   node3:
-    build: .
+    <<: *node
     environment:
+      <<: *node-env
       NODE_ID: "3"
-      LISTEN_PORT: "4103"
-      RAFT_VOTERS: "1,2,3"
-      RAFT_PEERS: "1:172.28.0.11:4101,2:172.28.0.12:4102"
-      RUST_LOG: info
     ports:
       - "4103:4103"
     networks:
       raft:
         ipv4_address: 172.28.0.13
     depends_on:
-      - node1
       - node2
+
+  node4:
+    <<: *node
+    environment:
+      <<: *node-env
+      NODE_ID: "4"
+    ports:
+      - "4104:4104"
+    networks:
+      raft:
+        ipv4_address: 172.28.0.14
+    depends_on:
+      - node3
+
+  node5:
+    <<: *node
+    environment:
+      <<: *node-env
+      NODE_ID: "5"
+    ports:
+      - "4105:4105"
+    networks:
+      raft:
+        ipv4_address: 172.28.0.15
+    depends_on:
+      - node4
+
+  node6:
+    <<: *node
+    environment:
+      <<: *node-env
+      NODE_ID: "6"
+    ports:
+      - "4106:4106"
+    networks:
+      raft:
+        ipv4_address: 172.28.0.16
+    depends_on:
+      - node5
 
 networks:
   raft:

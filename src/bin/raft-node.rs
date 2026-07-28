@@ -1,94 +1,80 @@
 //! Single Raft node binary for Docker / multi-process deployments.
 //!
-//! Run locally:
+//! Cluster topology: one TOML file (`CLUSTER_CONFIG`, default `config/cluster.local.toml`).
+//!
 //! ```text
-//! NODE_ID=1 LISTEN_PORT=4101 RAFT_PEERS=2:127.0.0.1:4102,3:127.0.0.1:4103 cargo run --bin raft-node
+//! NODE_ID=1 cargo run --bin raft-node
+//! cargo run --bin raft-node -- --list-nodes
 //! ```
+//!
+//! Legacy env (no cluster file): `RAFT_PEERS=2:127.0.0.1:4102,...` + `RAFT_VOTERS=1,2,3`
 
 use std::env;
 use std::error::Error;
-use std::net::ToSocketAddrs;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use futures::future::FutureExt;
 use futures::StreamExt;
-use libp2p::identity::ed25519;
-use libp2p::identity::Keypair;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId, SwarmBuilder};
+use libp2p_raft::cluster_config::{resolve_host_port, ClusterConfig};
 use libp2p_raft::config::{RaftConfig, SeedPeer};
+use libp2p_raft::node_identity::{keypair_for_node, peer_id_for_node};
 use libp2p_raft::raft::types::{EntryType, Role};
 use libp2p_raft::storage::MemoryStorage;
 use libp2p_raft::{Event, RaftBehaviour};
 use tracing_subscriber::EnvFilter;
 
-/// Deterministic ed25519 key per node id so peers can derive each other's PeerId without key files.
-fn keypair_for_node(node_id: u64) -> Result<Keypair, Box<dyn Error>> {
-    let mut seed = [0u8; 32];
-    seed[0] = node_id as u8;
-    seed[1..9].copy_from_slice(b"libp2prf");
-    let secret = ed25519::SecretKey::try_from_bytes(seed)?;
-    Ok(Keypair::from(ed25519::Keypair::from(secret)))
+const DEFAULT_CLUSTER_CONFIG: &str = "config/cluster.local.toml";
+
+fn cluster_config_path() -> PathBuf {
+    env::var("CLUSTER_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_CLUSTER_CONFIG))
 }
 
-fn peer_id_for_node(node_id: u64) -> Result<PeerId, Box<dyn Error>> {
-    Ok(PeerId::from(keypair_for_node(node_id)?.public()))
-}
-
-/// `RAFT_PEERS` format: `node_id:host:port,...` e.g. `2:172.28.0.12:4102,3:172.28.0.13:4103`
-fn parse_peers(raw: &str, self_id: u64) -> Result<Vec<SeedPeer>, Box<dyn Error>> {
+/// `RAFT_PEERS` format: `node_id:host:port,...`
+fn parse_peers_legacy(raw: &str, self_id: u64) -> Result<Vec<SeedPeer>, String> {
     let mut out = Vec::new();
     for part in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let mut fields = part.split(':');
         let node_id: u64 = fields
             .next()
             .ok_or("peer entry missing node_id")?
-            .parse()?;
+            .parse()
+            .map_err(|e| format!("peer node_id: {e}"))?;
         if node_id == self_id {
             continue;
         }
-        let host = fields.next().ok_or("peer entry missing host")?;
+        let host = fields.next().ok_or("peer entry missing host")?.to_string();
         let port: u16 = fields
             .next()
             .ok_or("peer entry missing port")?
-            .parse()?;
-        let addr = resolve_peer_addr(host, port)?;
+            .parse()
+            .map_err(|e| format!("peer port: {e}"))?;
+        let addr = resolve_host_port(&host, port)?;
         out.push(SeedPeer {
             node_id,
-            peer_id: peer_id_for_node(node_id)?,
+            peer_id: peer_id_for_node(node_id).map_err(|e| e.to_string())?,
             addrs: vec![addr],
         });
     }
     Ok(out)
 }
 
-fn resolve_peer_addr(host: &str, port: u16) -> Result<Multiaddr, Box<dyn Error>> {
-    let sock = (host, port)
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| format!("could not resolve {host}:{port}"))?;
-    let ip = sock.ip();
-    let addr: Multiaddr = if ip.is_ipv4() {
-        format!("/ip4/{ip}/tcp/{port}").parse()?
-    } else {
-        format!("/ip6/{ip}/tcp/{port}").parse()?
-    };
-    Ok(addr)
-}
-
-async fn resolve_peers_with_retry(
-    raw: &str,
-    self_id: u64,
+async fn seed_peers_with_retry(
+    load: impl Fn() -> Result<Vec<SeedPeer>, String>,
 ) -> Result<Vec<SeedPeer>, Box<dyn Error>> {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        match parse_peers(raw, self_id) {
+        match load() {
             Ok(peers) => return Ok(peers),
             Err(e) if Instant::now() < deadline => {
                 eprintln!("peer resolve retry: {e}");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         }
     }
 }
@@ -130,8 +116,79 @@ fn build_config(node_id: u64, voters: Vec<u64>, seed_peers: Vec<SeedPeer>) -> Ra
     }
 }
 
+struct NodeRuntimeConfig {
+    voters: Vec<u64>,
+    seed_peers: Vec<SeedPeer>,
+    listen_port: u16,
+    propose_hello: bool,
+}
+
+fn load_from_cluster(path: &Path, node_id: u64) -> Result<NodeRuntimeConfig, String> {
+    let cluster = ClusterConfig::load(path)?;
+    let listen_port = cluster
+        .listen_port(node_id)
+        .ok_or_else(|| format!("node {node_id} not defined in {}", path.display()))?;
+    let propose_hello = cluster.propose_hello_node == Some(node_id)
+        || env::var("PROPOSE_HELLO")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    Ok(NodeRuntimeConfig {
+        voters: cluster.voters.clone(),
+        seed_peers: cluster.seed_peers(node_id)?,
+        listen_port,
+        propose_hello,
+    })
+}
+
+async fn load_runtime_config(node_id: u64) -> Result<NodeRuntimeConfig, Box<dyn Error>> {
+    let cluster_path = cluster_config_path();
+    if cluster_path.is_file() {
+        let path = cluster_path.clone();
+        let seed_peers = seed_peers_with_retry(move || {
+            ClusterConfig::load(&path).and_then(|c| c.seed_peers(node_id))
+        })
+        .await?;
+        let mut rt = load_from_cluster(&cluster_path, node_id)?;
+        rt.seed_peers = seed_peers;
+        return Ok(rt);
+    }
+
+    let voters_raw = env::var("RAFT_VOTERS").unwrap_or_else(|_| "1,2,3".into());
+    let voters = parse_voters(&voters_raw)?;
+    let listen_port = env_u64("LISTEN_PORT", 4100 + node_id) as u16;
+    let peers_raw = env::var("RAFT_PEERS").unwrap_or_default();
+    let seed_peers = seed_peers_with_retry({
+        let raw = peers_raw;
+        move || parse_peers_legacy(&raw, node_id)
+    })
+    .await?;
+    let propose_hello = env::var("PROPOSE_HELLO")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    Ok(NodeRuntimeConfig {
+        voters,
+        seed_peers,
+        listen_port,
+        propose_hello,
+    })
+}
+
+fn list_nodes() -> Result<(), Box<dyn Error>> {
+    let path = cluster_config_path();
+    let cluster = ClusterConfig::load(&path)?;
+    for id in cluster.node_ids() {
+        println!("{id}");
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let args: Vec<String> = env::args().collect();
+    if args.iter().any(|a| a == "--list-nodes") {
+        return list_nodes();
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -140,21 +197,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if node_id == 0 {
         return Err("NODE_ID must be set (e.g. 1..5)".into());
     }
-    let voters_raw = env::var("RAFT_VOTERS").unwrap_or_else(|_| "1,2,3,4,5".into());
-    let voters = parse_voters(&voters_raw)?;
-    let listen_port = env_u64("LISTEN_PORT", 4100 + node_id) as u16;
-    let peers_raw = env::var("RAFT_PEERS").unwrap_or_default();
-    let seed_peers = resolve_peers_with_retry(&peers_raw, node_id).await?;
-    let propose_hello = env::var("PROPOSE_HELLO")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+
+    let cluster_path = cluster_config_path();
+    let NodeRuntimeConfig {
+        voters,
+        seed_peers,
+        listen_port,
+        propose_hello,
+    } = load_runtime_config(node_id).await?;
 
     let kp = keypair_for_node(node_id)?;
     let self_peer = PeerId::from(kp.public());
     let listen: Multiaddr = format!("/ip4/0.0.0.0/tcp/{listen_port}").parse()?;
 
     println!(
-        "starting node_id={node_id} peer_id={self_peer} listen={listen} seeds={}",
+        "starting node_id={node_id} peer_id={self_peer} listen={listen} config={} seeds={}",
+        cluster_path.display(),
         seed_peers.len()
     );
 
@@ -171,7 +229,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .build();
     swarm.listen_on(listen)?;
 
-    // Wait until listener is up.
     loop {
         tokio::select! {
             ev = swarm.select_next_some() => {

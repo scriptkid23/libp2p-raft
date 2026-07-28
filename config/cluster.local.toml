@@ -1,0 +1,20 @@
+# Local 3-node cluster (127.0.0.1).
+# Run: scripts/run-cluster.ps1  OR  scripts/run-cluster.sh
+
+voters = [1, 2, 3]
+propose_hello_node = 1
+
+[[nodes]]
+id = 1
+host = "127.0.0.1"
+port = 4101
+
+[[nodes]]
+id = 2
+host = "127.0.0.1"
+port = 4102
+
+[[nodes]]
+id = 3
+host = "127.0.0.1"
+port = 4103
