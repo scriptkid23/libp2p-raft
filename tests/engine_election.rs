@@ -51,6 +51,7 @@ fn candidate_wins_majority_becomes_leader() {
             term: 1,
             vote_granted: true,
         },
+        Instant::now(),
     );
 
     assert!(matches!(eng.role(), Role::Leader));

@@ -7,15 +7,16 @@ description = "Learning DIY mini-Raft NetworkBehaviour for rust-libp2p"
 
 [dependencies]
 # TODO(Task 1): pin exact libp2p minor after first successful cargo build if 0.54 features need tweaks
-libp2p = { version = "0.54", features = ["tokio", "tcp", "noise", "yamux", "macros", "identify"] }
+libp2p = { version = "0.54", features = ["tokio", "tcp", "dns", "noise", "yamux", "macros", "identify"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 bincode = "1.3"
 thiserror = "1"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1"
 byteorder = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 void = "1"
 
 [dev-dependencies]
@@ -28,3 +29,7 @@ path = "examples/three_node.rs"
 [[example]]
 name = "echo_two_peers"
 path = "examples/echo_two_peers.rs"
+
+[[example]]
+name = "node"
+path = "examples/node.rs"

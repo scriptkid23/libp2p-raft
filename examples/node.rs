@@ -1,0 +1,261 @@
+//! Single Raft node for Docker / multi-process demos.
+//!
+//! Run locally:
+//! ```text
+//! NODE_ID=1 LISTEN_PORT=4101 RAFT_PEERS=2:127.0.0.1:4102,3:127.0.0.1:4103 cargo run --example node
+//! ```
+
+use std::env;
+use std::error::Error;
+use std::net::ToSocketAddrs;
+use std::time::{Duration, Instant};
+
+use futures::future::FutureExt;
+use futures::StreamExt;
+use libp2p::identity::ed25519;
+use libp2p::identity::Keypair;
+use libp2p::swarm::SwarmEvent;
+use libp2p::{Multiaddr, PeerId, SwarmBuilder};
+use libp2p_raft::config::{RaftConfig, SeedPeer};
+use libp2p_raft::raft::types::{EntryType, Role};
+use libp2p_raft::storage::MemoryStorage;
+use libp2p_raft::{Event, RaftBehaviour};
+use tracing_subscriber::EnvFilter;
+
+/// Deterministic ed25519 key per node id so peers can derive each other's PeerId without key files.
+fn keypair_for_node(node_id: u64) -> Result<Keypair, Box<dyn Error>> {
+    let mut seed = [0u8; 32];
+    seed[0] = node_id as u8;
+    seed[1..9].copy_from_slice(b"libp2prf");
+    let secret = ed25519::SecretKey::try_from_bytes(seed)?;
+    Ok(Keypair::from(ed25519::Keypair::from(secret)))
+}
+
+fn peer_id_for_node(node_id: u64) -> Result<PeerId, Box<dyn Error>> {
+    Ok(PeerId::from(keypair_for_node(node_id)?.public()))
+}
+
+/// `RAFT_PEERS` format: `node_id:host:port,...` e.g. `2:172.28.0.12:4102,3:172.28.0.13:4103`
+fn parse_peers(raw: &str, self_id: u64) -> Result<Vec<SeedPeer>, Box<dyn Error>> {
+    let mut out = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let mut fields = part.split(':');
+        let node_id: u64 = fields
+            .next()
+            .ok_or("peer entry missing node_id")?
+            .parse()?;
+        if node_id == self_id {
+            continue;
+        }
+        let host = fields.next().ok_or("peer entry missing host")?;
+        let port: u16 = fields
+            .next()
+            .ok_or("peer entry missing port")?
+            .parse()?;
+        let addr = resolve_peer_addr(host, port)?;
+        out.push(SeedPeer {
+            node_id,
+            peer_id: peer_id_for_node(node_id)?,
+            addrs: vec![addr],
+        });
+    }
+    Ok(out)
+}
+
+fn resolve_peer_addr(host: &str, port: u16) -> Result<Multiaddr, Box<dyn Error>> {
+    let sock = (host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| format!("could not resolve {host}:{port}"))?;
+    let ip = sock.ip();
+    let addr: Multiaddr = if ip.is_ipv4() {
+        format!("/ip4/{ip}/tcp/{port}").parse()?
+    } else {
+        format!("/ip6/{ip}/tcp/{port}").parse()?
+    };
+    Ok(addr)
+}
+
+async fn resolve_peers_with_retry(
+    raw: &str,
+    self_id: u64,
+) -> Result<Vec<SeedPeer>, Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match parse_peers(raw, self_id) {
+            Ok(peers) => return Ok(peers),
+            Err(e) if Instant::now() < deadline => {
+                eprintln!("peer resolve retry: {e}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn parse_voters(raw: &str) -> Result<Vec<u64>, Box<dyn Error>> {
+    let voters: Result<Vec<_>, _> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse())
+        .collect();
+    let voters = voters?;
+    if voters.is_empty() {
+        return Err("RAFT_VOTERS must list at least one node id".into());
+    }
+    Ok(voters)
+}
+
+fn build_config(node_id: u64, voters: Vec<u64>, seed_peers: Vec<SeedPeer>) -> RaftConfig {
+    let election_base = env_u64("ELECTION_TIMEOUT_MS", 500 + node_id * 200);
+    let jitter = env_u64("ELECTION_JITTER_MS", 10 + node_id * 30);
+    RaftConfig {
+        node_id,
+        voters,
+        seed_peers,
+        election_timeout: Duration::from_millis(election_base),
+        election_jitter: Duration::from_millis(jitter),
+        heartbeat_interval: Duration::from_millis(env_u64("HEARTBEAT_MS", 100)),
+        rpc_timeout: Duration::from_millis(env_u64("RPC_TIMEOUT_MS", 500)),
+        rpc_max_retries: 0,
+        snapshot_threshold: 10_000,
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    let node_id = env_u64("NODE_ID", 0);
+    if node_id == 0 {
+        return Err("NODE_ID must be set (e.g. 1..5)".into());
+    }
+    let voters_raw = env::var("RAFT_VOTERS").unwrap_or_else(|_| "1,2,3,4,5".into());
+    let voters = parse_voters(&voters_raw)?;
+    let listen_port = env_u64("LISTEN_PORT", 4100 + node_id) as u16;
+    let peers_raw = env::var("RAFT_PEERS").unwrap_or_default();
+    let seed_peers = resolve_peers_with_retry(&peers_raw, node_id).await?;
+    let propose_hello = env::var("PROPOSE_HELLO")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let kp = keypair_for_node(node_id)?;
+    let self_peer = PeerId::from(kp.public());
+    let listen: Multiaddr = format!("/ip4/0.0.0.0/tcp/{listen_port}").parse()?;
+
+    println!(
+        "starting node_id={node_id} peer_id={self_peer} listen={listen} seeds={}",
+        seed_peers.len()
+    );
+
+    let cfg = build_config(node_id, voters, seed_peers.clone());
+    let mut swarm = SwarmBuilder::with_existing_identity(kp)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )?
+        .with_behaviour(|_| RaftBehaviour::new(cfg, MemoryStorage::new()))?
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+        .build();
+    swarm.listen_on(listen)?;
+
+    // Wait until listener is up.
+    loop {
+        tokio::select! {
+            ev = swarm.select_next_some() => {
+                if matches!(ev, SwarmEvent::NewListenAddr { .. }) {
+                    break;
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                return Err("timeout waiting for listen address".into());
+            }
+        }
+    }
+
+    for seed in &seed_peers {
+        swarm.behaviour_mut().dial_seed(seed.peer_id);
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut stable_leader_since: Option<Instant> = None;
+    let mut proposed = false;
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+
+    loop {
+        tokio::select! {
+            ev = swarm.select_next_some() => handle_event(node_id, ev, &mut stable_leader_since),
+            _ = tick.tick() => {
+                while let Some(Some(ev)) = swarm.next().now_or_never() {
+                    handle_event(node_id, ev, &mut stable_leader_since);
+                }
+            }
+        }
+
+        if propose_hello
+            && !proposed
+            && swarm.behaviour().role() == Role::Leader
+        {
+            if stable_leader_since.is_none() {
+                stable_leader_since = Some(Instant::now());
+            } else if stable_leader_since.unwrap().elapsed() >= Duration::from_secs(1) {
+                let idx = swarm.behaviour_mut().propose(b"hello".to_vec())?;
+                println!("node {node_id} proposed hello at index={idx}");
+                proposed = true;
+            }
+        }
+    }
+}
+
+fn handle_event(
+    node_id: u64,
+    ev: SwarmEvent<Event>,
+    stable_leader_since: &mut Option<Instant>,
+) {
+    match ev {
+        SwarmEvent::Behaviour(Event::RoleChanged { role, term, .. }) => {
+            println!("node {node_id} -> {role:?} term={term}");
+            if role != Role::Leader {
+                *stable_leader_since = None;
+            }
+        }
+        SwarmEvent::Behaviour(Event::Committed { entries }) => {
+            for e in entries {
+                let EntryType::Command(data) = e.entry_type;
+                println!(
+                    "node {node_id} Committed index={} data={:?}",
+                    e.index,
+                    String::from_utf8_lossy(&data)
+                );
+            }
+        }
+        SwarmEvent::Behaviour(Event::PeerMapped { peer, node }) => {
+            println!("node {node_id} PeerMapped peer={peer} node={node}");
+        }
+        SwarmEvent::Behaviour(Event::RpcFailed { peer, error }) => {
+            eprintln!("node {node_id} RpcFailed peer={peer} error={error}");
+        }
+        SwarmEvent::NewListenAddr { address, .. } => {
+            println!("node {node_id} listening on {address}");
+        }
+        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+            println!("node {node_id} connected to {peer_id}");
+        }
+        SwarmEvent::ConnectionClosed { peer_id, .. } => {
+            println!("node {node_id} disconnected from {peer_id}");
+        }
+        _ => {}
+    }
+}
