@@ -180,8 +180,11 @@ src/
   protocol/      # messages, codec, upgrade
   raft/          # engine, types, log, snapshot, membership
   storage/       # trait + MemoryStorage
+  bin/
+    raft-node.rs # deployable single-node binary (Docker / multi-process)
 examples/
-  three_node.rs  # builds Swarms + demo cluster
+  three_node.rs  # in-process 3-node demo
+  echo_two_peers.rs
 tests/
   engine_*.rs    # pure engine tests (no Swarm) — engine is independently unit-testable
   codec_roundtrip.rs

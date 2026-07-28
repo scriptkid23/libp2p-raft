@@ -1,8 +1,8 @@
-//! Single Raft node for Docker / multi-process demos.
+//! Single Raft node binary for Docker / multi-process deployments.
 //!
 //! Run locally:
 //! ```text
-//! NODE_ID=1 LISTEN_PORT=4101 RAFT_PEERS=2:127.0.0.1:4102,3:127.0.0.1:4103 cargo run --example node
+//! NODE_ID=1 LISTEN_PORT=4101 RAFT_PEERS=2:127.0.0.1:4102,3:127.0.0.1:4103 cargo run --bin raft-node
 //! ```
 
 use std::env;

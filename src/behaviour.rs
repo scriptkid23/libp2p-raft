@@ -185,10 +185,8 @@ impl<S: Storage + 'static> RaftBehaviour<S> {
     }
 
     fn dial_backoff(&mut self, peer: PeerId) {
-        self.dial_backoff_until.insert(
-            peer,
-            Instant::now() + Duration::from_secs(5),
-        );
+        self.dial_backoff_until
+            .insert(peer, Instant::now() + Duration::from_secs(5));
     }
 
     fn arm_sleep(&mut self, deadline: Instant) {
@@ -414,8 +412,11 @@ impl<S: Storage + 'static> NetworkBehaviour for RaftBehaviour<S> {
                     }
                 }
                 self.dialing.remove(&e.peer_id);
+
+                if !self.is_connected(e.peer_id) {
+                    self.fail_peer_pending(e.peer_id, "connection closed".into(), false);
+                }
                 // Transient disconnect; engine retries on next tick — no RpcFailed spam.
-                self.fail_peer_pending(e.peer_id, "connection closed".into(), false);
             }
             FromSwarm::DialFailure(e) => {
                 if let Some(peer) = e.peer_id {
@@ -501,7 +502,10 @@ impl<S: Storage + 'static> NetworkBehaviour for RaftBehaviour<S> {
         self.arm_sleep(self.earliest_wake());
     }
 
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+    fn poll(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         self.waker = Some(cx.waker().clone());
         loop {
             if let Some(ev) = self.pending_events.pop_front() {
@@ -514,7 +518,9 @@ impl<S: Storage + 'static> NetworkBehaviour for RaftBehaviour<S> {
             let timed_out: Vec<u64> = self
                 .pending
                 .iter()
-                .filter(|(_, p)| now.saturating_duration_since(p.sent_at) >= self.config.rpc_timeout)
+                .filter(|(_, p)| {
+                    now.saturating_duration_since(p.sent_at) >= self.config.rpc_timeout
+                })
                 .map(|(id, _)| *id)
                 .collect();
             for id in timed_out {

@@ -30,6 +30,6 @@ path = "examples/three_node.rs"
 name = "echo_two_peers"
 path = "examples/echo_two_peers.rs"
 
-[[example]]
-name = "node"
-path = "examples/node.rs"
+[[bin]]
+name = "raft-node"
+path = "src/bin/raft-node.rs"
