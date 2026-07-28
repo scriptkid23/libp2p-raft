@@ -184,9 +184,22 @@ impl<S: Storage + 'static> RaftBehaviour<S> {
             || error.contains("No route to host")
     }
 
+    fn dial_backoff_jitter_ms(&self, peer: PeerId) -> u64 {
+        let target = self.peer_map.node_id(peer).unwrap_or(0);
+        (self.config.node_id
+            .wrapping_mul(137)
+            .wrapping_add(target.wrapping_mul(89))
+            .wrapping_add(31))
+            % 500
+    }
+
     fn dial_backoff(&mut self, peer: PeerId) {
-        self.dial_backoff_until
-            .insert(peer, Instant::now() + Duration::from_secs(5));
+        const BASE_SECS: u64 = 5;
+        let jitter_ms = self.dial_backoff_jitter_ms(peer);
+        self.dial_backoff_until.insert(
+            peer,
+            Instant::now() + Duration::from_secs(BASE_SECS) + Duration::from_millis(jitter_ms),
+        );
     }
 
     fn arm_sleep(&mut self, deadline: Instant) {
