@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use libp2p::core::transport::PortUse;
 use libp2p::core::Endpoint;
@@ -66,6 +66,10 @@ pub struct RaftBehaviour<S: Storage> {
     config: RaftConfig,
     peer_map: PeerMap,
     connected: HashMap<PeerId, HashSet<ConnectionId>>,
+    /// Peers we have an outbound dial in flight for (avoids DialPeerConditionFalse spam).
+    dialing: HashSet<PeerId>,
+    /// Do not redial until this instant (after transport failure to a dead/unreachable peer).
+    dial_backoff_until: HashMap<PeerId, Instant>,
     pending_events: VecDeque<ToSwarm<Event, FromBehaviour>>,
     next_correlation_id: u64,
     pending: HashMap<u64, PendingRequest>,
@@ -91,6 +95,8 @@ impl<S: Storage + 'static> RaftBehaviour<S> {
             config,
             peer_map,
             connected: HashMap::new(),
+            dialing: HashSet::new(),
+            dial_backoff_until: HashMap::new(),
             pending_events,
             next_correlation_id: 1,
             pending: HashMap::new(),
@@ -134,6 +140,16 @@ impl<S: Storage + 'static> RaftBehaviour<S> {
     }
 
     pub fn dial_seed(&mut self, peer: PeerId) {
+        if self.is_connected(peer) || self.dialing.contains(&peer) {
+            return;
+        }
+        if self
+            .dial_backoff_until
+            .get(&peer)
+            .is_some_and(|until| Instant::now() < *until)
+        {
+            return;
+        }
         let Some(node) = self.peer_map.node_id(peer) else {
             return;
         };
@@ -143,12 +159,36 @@ impl<S: Storage + 'static> RaftBehaviour<S> {
         if addrs.is_empty() {
             return;
         }
+        self.dialing.insert(peer);
         self.pending_events.push_back(ToSwarm::Dial {
             opts: DialOpts::peer_id(peer)
                 .condition(PeerCondition::DisconnectedAndNotDialing)
                 .addresses(addrs)
                 .build(),
         });
+    }
+
+    fn is_connected(&self, peer: PeerId) -> bool {
+        self.connected
+            .get(&peer)
+            .map(|c| !c.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn is_benign_dial_error(error: &str) -> bool {
+        error.contains("DialPeerConditionFalse")
+            || error.contains("DisconnectedAndNotDialing")
+            || error.contains("Timeout")
+            || error.contains("HostUnreachable")
+            || error.contains("ConnectionRefused")
+            || error.contains("No route to host")
+    }
+
+    fn dial_backoff(&mut self, peer: PeerId) {
+        self.dial_backoff_until.insert(
+            peer,
+            Instant::now() + Duration::from_secs(5),
+        );
     }
 
     fn arm_sleep(&mut self, deadline: Instant) {
@@ -254,20 +294,10 @@ impl<S: Storage + 'static> RaftBehaviour<S> {
             return;
         };
 
-        if !self
-            .connected
-            .get(&peer)
-            .map(|c| !c.is_empty())
-            .unwrap_or(false)
-        {
-            // Dial; drop this RPC (lossy). Clear engine AE inflight so heartbeat can retry.
+        if !self.is_connected(peer) {
+            // Drop RPC; clear AE inflight; dial once. No RpcFailed — heartbeat/election retries.
             let _ = self.engine.handle_rpc_failure(to, kind);
             self.dial_seed(peer);
-            self.pending_events
-                .push_back(ToSwarm::GenerateEvent(Event::RpcFailed {
-                    peer,
-                    error: Error::Rpc("not connected; dialing".into()),
-                }));
             return;
         }
 
@@ -294,19 +324,21 @@ impl<S: Storage + 'static> RaftBehaviour<S> {
         });
     }
 
-    fn fail_pending(&mut self, correlation_id: u64, error: String) {
+    fn fail_pending(&mut self, correlation_id: u64, error: String, emit_event: bool) {
         if let Some(p) = self.pending.remove(&correlation_id) {
             let actions = self.engine.handle_rpc_failure(p.to, p.kind);
             self.execute_actions(actions, None);
-            self.pending_events
-                .push_back(ToSwarm::GenerateEvent(Event::RpcFailed {
-                    peer: p.peer,
-                    error: Error::Rpc(error),
-                }));
+            if emit_event {
+                self.pending_events
+                    .push_back(ToSwarm::GenerateEvent(Event::RpcFailed {
+                        peer: p.peer,
+                        error: Error::Rpc(error),
+                    }));
+            }
         }
     }
 
-    fn fail_peer_pending(&mut self, peer: PeerId, error: String) {
+    fn fail_peer_pending(&mut self, peer: PeerId, error: String, emit_event: bool) {
         let ids: Vec<u64> = self
             .pending
             .iter()
@@ -314,7 +346,7 @@ impl<S: Storage + 'static> RaftBehaviour<S> {
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
-            self.fail_pending(id, error.clone());
+            self.fail_pending(id, error.clone(), emit_event);
         }
     }
 }
@@ -367,6 +399,8 @@ impl<S: Storage + 'static> NetworkBehaviour for RaftBehaviour<S> {
     fn on_swarm_event(&mut self, event: FromSwarm) {
         match event {
             FromSwarm::ConnectionEstablished(e) => {
+                self.dialing.remove(&e.peer_id);
+                self.dial_backoff_until.remove(&e.peer_id);
                 self.connected
                     .entry(e.peer_id)
                     .or_default()
@@ -379,16 +413,26 @@ impl<S: Storage + 'static> NetworkBehaviour for RaftBehaviour<S> {
                         self.connected.remove(&e.peer_id);
                     }
                 }
-                self.fail_peer_pending(e.peer_id, "connection closed".into());
+                self.dialing.remove(&e.peer_id);
+                // Transient disconnect; engine retries on next tick — no RpcFailed spam.
+                self.fail_peer_pending(e.peer_id, "connection closed".into(), false);
             }
             FromSwarm::DialFailure(e) => {
                 if let Some(peer) = e.peer_id {
-                    self.fail_peer_pending(peer, format!("dial failure: {:?}", e.error));
-                    self.pending_events
-                        .push_back(ToSwarm::GenerateEvent(Event::RpcFailed {
-                            peer,
-                            error: Error::Rpc(format!("dial failure: {:?}", e.error)),
-                        }));
+                    self.dialing.remove(&peer);
+                    let err = format!("{:?}", e.error);
+                    let benign = Self::is_benign_dial_error(&err);
+                    if benign {
+                        self.dial_backoff(peer);
+                    }
+                    self.fail_peer_pending(peer, format!("dial failure: {err}"), !benign);
+                    if !benign {
+                        self.pending_events
+                            .push_back(ToSwarm::GenerateEvent(Event::RpcFailed {
+                                peer,
+                                error: Error::Rpc(format!("dial failure: {err}")),
+                            }));
+                    }
                 }
             }
             _ => {}
@@ -444,7 +488,7 @@ impl<S: Storage + 'static> NetworkBehaviour for RaftBehaviour<S> {
                 error,
             } => {
                 if let Some(id) = correlation_id {
-                    self.fail_pending(id, error);
+                    self.fail_pending(id, error, true);
                 } else {
                     self.pending_events
                         .push_back(ToSwarm::GenerateEvent(Event::RpcFailed {
@@ -474,7 +518,7 @@ impl<S: Storage + 'static> NetworkBehaviour for RaftBehaviour<S> {
                 .map(|(id, _)| *id)
                 .collect();
             for id in timed_out {
-                self.fail_pending(id, "rpc timeout".into());
+                self.fail_pending(id, "rpc timeout".into(), false);
             }
             if let Some(ev) = self.pending_events.pop_front() {
                 self.arm_sleep(self.earliest_wake());
