@@ -7,15 +7,7 @@ Learning / research crate: a **DIY mini-Raft** exposed as a rust-libp2p **`Netwo
 **Why a custom `ConnectionHandler` instead of `libp2p::request_response`?**  
 Learning goal: understand Behaviour ↔ Handler lifecycle, substream framing, and unary RPC plumbing end-to-end. Production code would often compose `request_response`; we hand-roll it on purpose.
 
-**Docs**
-- Handler → Behaviour → Engine architecture: [`docs/handler-behaviour-engine-en.md`](docs/handler-behaviour-engine-en.md) (EN) · [`docs/handler-behaviour-engine.md`](docs/handler-behaviour-engine.md) (VI)
-- libp2p fundamentals (connection → substream → protocol → Handler): [`docs/libp2p-fundamentals.md`](docs/libp2p-fundamentals.md)
-- Phase 1 (engine election + MemoryStorage): [`docs/phase-1.md`](docs/phase-1.md)
-- Phase 2 (election over libp2p): [`docs/phase-2.md`](docs/phase-2.md)
-- Phase 3 (replication + propose + commit): [`docs/phase-3.md`](docs/phase-3.md)
-- Design spec: [`docs/superpowers/specs/2026-07-23-libp2p-raft-design.md`](docs/superpowers/specs/2026-07-23-libp2p-raft-design.md)
-- Implementation plan: [`docs/superpowers/plans/2026-07-23-libp2p-raft.md`](docs/superpowers/plans/2026-07-23-libp2p-raft.md)
-- Phase 2 plan: [`docs/superpowers/plans/2026-07-27-phase-2-election-over-libp2p.md`](docs/superpowers/plans/2026-07-27-phase-2-election-over-libp2p.md)
+**Docs:** [`docs/architecture.md`](docs/architecture.md)
 
 ---
 
